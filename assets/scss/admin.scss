@@ -28,13 +28,22 @@ $transition-speed: .15s;
 // Admin Bar — Language Switcher
 // ===========================================
 
-#wpadminbar .wp-loc-lang-switcher {
-  .ab-item,
-  .ab-submenu {
+#wpadminbar #wp-admin-bar-wp_loc_lang_switcher {
+  // Keep both the current language and submenu rows above core's block layout.
+  .ab-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+
     img {
       @include flag-icon;
-      margin-right: 5px;
-      vertical-align: text-bottom;
+      display: block;
+      flex: none;
+      max-height: $flag-height;
+      margin: 0;
+      border-radius: 2px;
+      object-fit: contain;
     }
   }
 }
