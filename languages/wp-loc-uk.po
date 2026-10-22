@@ -348,6 +348,14 @@ msgstr "Налаштування збережено."
 msgid "Translation Workflow"
 msgstr "Процес перекладу"
 
+#: includes/class-wp-loc-admin-settings.php:737
+msgid ""
+"Create new posts, pages and terms only in the default language; other "
+"languages get them as translations"
+msgstr ""
+"Створювати нові записи, сторінки й терміни лише основною мовою; інші мови "
+"отримують їх як переклади"
+
 #: includes/class-wp-loc-admin-settings.php:716
 msgid ""
 "Automatically create sibling post and page translations when a new source "
@@ -680,6 +688,12 @@ msgstr ""
 #: includes/class-wp-loc-terms.php:1202 includes/class-wp-loc-terms.php:1262
 msgid "Translations"
 msgstr "Переклади"
+
+#. translators: %s: language name
+#: includes/class-wp-loc-admin.php:747
+#, php-format
+msgid "This post will be created in %s."
+msgstr "Запис буде створено мовою %s."
 
 #: includes/class-wp-loc-admin.php:662
 msgid "Save the post first to manage translations."

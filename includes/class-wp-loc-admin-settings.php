@@ -9,6 +9,7 @@ class WP_LOC_Admin_Settings {
     const AUTO_CREATE_POST_TRANSLATIONS_OPTION_KEY = 'wp_loc_auto_create_post_translations';
     const AUTO_CREATE_TERM_TRANSLATIONS_OPTION_KEY = 'wp_loc_auto_create_term_translations';
     const AUTO_CREATE_MENU_TRANSLATIONS_OPTION_KEY = 'wp_loc_auto_create_menu_translations';
+    const RESTRICT_NEW_CONTENT_TO_DEFAULT_LANGUAGE_OPTION_KEY = 'wp_loc_restrict_new_content_to_default_language';
     const SYNC_POST_TAXONOMIES_OPTION_KEY = 'wp_loc_sync_post_taxonomies';
     const SYNC_FEATURED_IMAGE_OPTION_KEY = 'wp_loc_sync_featured_image';
     const SYNC_POST_ATTRIBUTES_OPTION_KEY = 'wp_loc_sync_post_attributes';
@@ -434,6 +435,10 @@ TWIG;
         return (bool) get_option( self::AUTO_CREATE_MENU_TRANSLATIONS_OPTION_KEY, true );
     }
 
+    public static function should_restrict_new_content_to_default_language(): bool {
+        return (bool) get_option( self::RESTRICT_NEW_CONTENT_TO_DEFAULT_LANGUAGE_OPTION_KEY, true );
+    }
+
     public static function should_sync_post_taxonomies(): bool {
         return (bool) get_option( self::SYNC_POST_TAXONOMIES_OPTION_KEY, true );
     }
@@ -555,6 +560,7 @@ TWIG;
             $auto_create_posts = isset( $_POST['wp_loc_auto_create_post_translations'] ) ? 1 : 0;
             $auto_create_terms = isset( $_POST['wp_loc_auto_create_term_translations'] ) ? 1 : 0;
             $auto_create_menus = isset( $_POST['wp_loc_auto_create_menu_translations'] ) ? 1 : 0;
+            $restrict_new_content = isset( $_POST['wp_loc_restrict_new_content_to_default_language'] ) ? 1 : 0;
             $sync_post_taxonomies = isset( $_POST['wp_loc_sync_post_taxonomies'] ) ? 1 : 0;
             $sync_featured_image = isset( $_POST['wp_loc_sync_featured_image'] ) ? 1 : 0;
             $sync_post_attributes = isset( $_POST['wp_loc_sync_post_attributes'] ) ? 1 : 0;
@@ -565,6 +571,7 @@ TWIG;
             update_option( self::AUTO_CREATE_POST_TRANSLATIONS_OPTION_KEY, $auto_create_posts );
             update_option( self::AUTO_CREATE_TERM_TRANSLATIONS_OPTION_KEY, $auto_create_terms );
             update_option( self::AUTO_CREATE_MENU_TRANSLATIONS_OPTION_KEY, $auto_create_menus );
+            update_option( self::RESTRICT_NEW_CONTENT_TO_DEFAULT_LANGUAGE_OPTION_KEY, $restrict_new_content );
             update_option( self::SYNC_POST_TAXONOMIES_OPTION_KEY, $sync_post_taxonomies );
             update_option( self::SYNC_FEATURED_IMAGE_OPTION_KEY, $sync_featured_image );
             update_option( self::SYNC_POST_ATTRIBUTES_OPTION_KEY, $sync_post_attributes );
@@ -653,6 +660,7 @@ TWIG;
         $auto_create_posts = self::should_auto_create_post_translations();
         $auto_create_terms = self::should_auto_create_term_translations();
         $auto_create_menus = self::should_auto_create_menu_translations();
+        $restrict_new_content = self::should_restrict_new_content_to_default_language();
         $sync_post_taxonomies = self::should_sync_post_taxonomies();
         $sync_featured_image = self::should_sync_featured_image();
         $sync_post_attributes = self::should_sync_post_attributes();
@@ -720,6 +728,14 @@ TWIG;
                                 <th scope="row"><?php esc_html_e( 'Translation Workflow', 'wp-loc' ); ?></th>
                                 <td>
                                     <fieldset class="wp-loc-settings-stack">
+                                        <label class="wp-loc-settings-label">
+                                            <input type="checkbox"
+                                                   name="wp_loc_restrict_new_content_to_default_language"
+                                                   value="1"
+                                                   <?php checked( $restrict_new_content ); ?>
+                                            />
+                                            <span><?php esc_html_e( 'Create new posts, pages and terms only in the default language; other languages get them as translations', 'wp-loc' ); ?></span>
+                                        </label>
                                         <label class="wp-loc-settings-label">
                                             <input type="checkbox"
                                                    name="wp_loc_auto_create_post_translations"

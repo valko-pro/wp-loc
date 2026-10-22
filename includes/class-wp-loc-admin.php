@@ -71,9 +71,23 @@ class WP_LOC_Admin {
 
         if ( $screen && $screen->is_block_editor() ) {
             $deps[] = 'wp-data';
-            if ( $editing_post_id && get_post( $editing_post_id ) ) {
-                $editing_post = get_post( $editing_post_id );
-                $base_url = remove_query_arg( [ 'paged', 'wp_loc_lang' ] );
+            global $pagenow;
+            $is_new_post_screen = $pagenow === 'post-new.php' && WP_LOC_Admin_Settings::is_translatable( (string) $screen->post_type );
+
+            if ( $is_new_post_screen ) {
+                $this->send_new_post_language_with_rest_requests( (string) $screen->post_type );
+            }
+
+            // A new post can switch its language only where new content may start in any language.
+            if ( ( $editing_post_id && get_post( $editing_post_id ) ) || ( $is_new_post_screen && ! WP_LOC_Admin_Settings::should_restrict_new_content_to_default_language() ) ) {
+                global $post;
+                $base_url = remove_query_arg( [ 'paged', 'wp_loc_lang', 'wp_loc_new_post' ] );
+
+                // After its first save the editor keeps these links, so they name the new post:
+                // handle_lang_switch() then goes to its translation instead of another empty post.
+                if ( $is_new_post_screen && $post instanceof \WP_Post ) {
+                    $base_url = add_query_arg( 'wp_loc_new_post', $post->ID, $base_url );
+                }
 
                 foreach ( WP_LOC_Languages::get_active_languages() as $slug => $data ) {
                     $locale = $data['locale'] ?? $slug;
@@ -146,6 +160,65 @@ class WP_LOC_Admin {
                 'confirmDeleteWpmlConfig' => __( 'Delete this legacy config file?', 'wp-loc' ),
             ],
         ] );
+    }
+
+    /**
+     * The block editor keeps post-new.php as its URL until the first save, so its REST
+     * requests name no post, and REST never gets the admin_lang cookie (path /wp-admin).
+     * Send the new post's language with the requests that depend on it — the post's own
+     * saves and autosaves, and the term requests of panels and blocks — as wp_loc_edit_lang.
+     * The post's own GETs are left alone: they are preloaded, and the language does not
+     * change what they return.
+     */
+    private function send_new_post_language_with_rest_requests( string $post_type ): void {
+        global $post;
+
+        if ( ! $post instanceof \WP_Post ) {
+            return;
+        }
+
+        $lang = WP_LOC_Content::get_new_post_language( (int) $post->ID ) ?? self::get_admin_lang();
+        $post_route = rest_get_route_for_post_type_items( $post_type );
+        $write_routes = $post_route ? [ ltrim( $post_route, '/' ) . '/' . $post->ID ] : [];
+        $term_routes = [];
+
+        foreach ( WP_LOC_Terms::get_translatable_taxonomies() as $taxonomy ) {
+            $taxonomy_route = rest_get_route_for_taxonomy_items( $taxonomy );
+
+            if ( $taxonomy_route ) {
+                $term_routes[] = ltrim( $taxonomy_route, '/' );
+            }
+        }
+
+        wp_add_inline_script(
+            'wp-api-fetch',
+            sprintf(
+                '( function ( lang, writeRoutes, termRoutes ) {
+                    var targets = function ( path, routes ) {
+                        return routes.some( function ( route ) {
+                            return path === route || path.indexOf( route + "/" ) === 0 || path.indexOf( route + "?" ) === 0;
+                        } );
+                    };
+
+                    wp.apiFetch.use( function ( options, next ) {
+                        var path = typeof options.path === "string" ? options.path.replace( /^\//, "" ) : "";
+                        var isRead = ( options.method || "GET" ).toUpperCase() === "GET";
+
+                        if ( path && ( targets( path, termRoutes ) || ( ! isRead && targets( path, writeRoutes ) ) ) ) {
+                            options = Object.assign( {}, options, {
+                                path: options.path + ( options.path.indexOf( "?" ) === -1 ? "?" : "&" ) + "wp_loc_edit_lang=" + encodeURIComponent( lang )
+                            } );
+                        }
+
+                        return next( options );
+                    } );
+                } )( %s, %s, %s );',
+                wp_json_encode( $lang ),
+                wp_json_encode( $write_routes ),
+                wp_json_encode( $term_routes )
+            ),
+            'after'
+        );
     }
 
     private function should_show_title_translate_for_post( \WP_Post $post ): bool {
@@ -340,6 +413,18 @@ class WP_LOC_Admin {
             }
         }
 
+        // The block editor's switcher on post-new.php, used after the new post was saved
+        if ( isset( $_GET['wp_loc_new_post'] ) ) {
+            $new_post = get_post( (int) $_GET['wp_loc_new_post'] );
+
+            if ( $new_post instanceof \WP_Post && $new_post->post_status !== 'auto-draft' && current_user_can( 'edit_post', $new_post->ID ) ) {
+                $translated_id = WP_LOC::instance()->db->get_element_translation( $new_post->ID, WP_LOC_DB::post_element_type( $new_post->post_type ), $slug );
+
+                wp_redirect( admin_url( 'post.php?post=' . ( $translated_id ?: $new_post->ID ) . '&action=edit' ) );
+                exit;
+            }
+        }
+
         // If editing a term, redirect to its translation
         if ( isset( $_GET['tag_ID'], $_GET['taxonomy'] ) ) {
             $term_id = (int) $_GET['tag_ID'];
@@ -402,7 +487,7 @@ class WP_LOC_Admin {
             }
         }
 
-        wp_redirect( remove_query_arg( 'wp_loc_lang' ) );
+        wp_redirect( remove_query_arg( [ 'wp_loc_lang', 'wp_loc_new_post' ] ) );
         exit;
     }
 
@@ -677,8 +762,12 @@ class WP_LOC_Admin {
      * Render translation meta box
      */
     public function render_translation_meta_box( \WP_Post $post ): void {
-        // Don't show for unsaved posts
+        // Don't show for unsaved posts, only the language the new post will be saved in
         if ( $post->post_status === 'auto-draft' ) {
+            $new_post_lang = WP_LOC_Content::get_new_post_language( $post->ID ) ?? self::get_admin_lang();
+
+            /* translators: %s: language name */
+            echo '<p class="wp-loc-metabox-message">' . esc_html( sprintf( __( 'This post will be created in %s.', 'wp-loc' ), WP_LOC_Languages::get_display_name( $new_post_lang ) ) ) . '</p>';
             echo '<p class="wp-loc-metabox-message">' . esc_html__( 'Save the post first to manage translations.', 'wp-loc' ) . '</p>';
             return;
         }
@@ -822,54 +911,68 @@ class WP_LOC_Admin {
         }
 
         // Create the translation draft
+        $content      = WP_LOC::instance()->content;
         $meta         = get_post_meta( $post_id );
         $thumbnail_id = get_post_thumbnail_id( $post_id );
 
-        $duplicate_id = wp_insert_post( [
-            'post_title'    => $post->post_title,
-            'post_content'  => $post->post_content,
-            'post_excerpt'  => $post->post_excerpt,
-            'post_status'   => $post->post_status,
-            'post_type'     => $post->post_type,
-            'post_parent'   => $post->post_parent,
-            'menu_order'    => $post->menu_order,
-            'post_password' => $post->post_password,
-            'post_author'   => $post->post_author,
-            'post_date'     => $post->post_date,
-            'post_date_gmt' => $post->post_date_gmt,
-        ] );
+        // The copy is registered by hand below, so WP-LOC's own save hooks stay out of it:
+        // otherwise the slug-fix save ran the group sync FROM the half-made copy and replaced
+        // the terms of every member, the source included, with core's default category.
+        WP_LOC_Content::$suspend_new_post_registration = true;
+
+        try {
+            $duplicate_id = wp_insert_post( [
+                'post_title'    => $post->post_title,
+                'post_content'  => $post->post_content,
+                'post_excerpt'  => $post->post_excerpt,
+                'post_status'   => $post->post_status,
+                'post_type'     => $post->post_type,
+                'post_parent'   => $content->get_translated_parent_id( $post, $lang_slug ),
+                'menu_order'    => $post->menu_order,
+                'post_password' => $post->post_password,
+                'post_author'   => $post->post_author,
+                'post_date'     => $post->post_date,
+                'post_date_gmt' => $post->post_date_gmt,
+            ] );
+
+            if ( $duplicate_id && ! is_wp_error( $duplicate_id ) ) {
+                $source_lang = $current_lang ?: wp_loc_get_admin_lang();
+                $db->set_element_language( $duplicate_id, $element_type, $lang_slug, $trid, $source_lang );
+
+                // Copy meta — before the slug-fix save, for the same reason as in
+                // WP_LOC_Content::create_translations(): save_post hooks on the registered
+                // translation must already see the source meta.
+                foreach ( $meta as $key => $values ) {
+                    if ( str_starts_with( $key, '_wp_loc_' ) ) continue;
+                    if ( $key === '_edit_lock' || $key === '_edit_last' ) continue;
+
+                    foreach ( $values as $value ) {
+                        add_post_meta( $duplicate_id, $key, maybe_unserialize( $value ) );
+                    }
+                }
+
+                if ( $thumbnail_id ) {
+                    $attachment_element_type = WP_LOC_DB::post_element_type( 'attachment' );
+                    $translated_thumb = $db->get_element_translation( (int) $thumbnail_id, $attachment_element_type, $lang_slug );
+                    set_post_thumbnail( $duplicate_id, $translated_thumb ?: $thumbnail_id );
+                }
+
+                // Fix slug — wp_insert_post may have added "-2" because icl_translations
+                // registration happens after insert; now that language is set, re-apply original slug
+                wp_update_post( [
+                    'ID'        => $duplicate_id,
+                    'post_name' => $post->post_name,
+                ] );
+            }
+        } finally {
+            WP_LOC_Content::$suspend_new_post_registration = false;
+        }
 
         if ( ! $duplicate_id || is_wp_error( $duplicate_id ) ) {
             wp_send_json_error( [ 'message' => 'Failed to create post' ] );
         }
 
-        $source_lang = $current_lang ?: wp_loc_get_admin_lang();
-        $db->set_element_language( $duplicate_id, $element_type, $lang_slug, $trid, $source_lang );
-
-        // Copy meta — before the slug-fix save, for the same reason as in
-        // WP_LOC_Content::create_translations(): save_post hooks on the registered
-        // translation must already see the source meta.
-        foreach ( $meta as $key => $values ) {
-            if ( str_starts_with( $key, '_wp_loc_' ) ) continue;
-            if ( $key === '_edit_lock' || $key === '_edit_last' ) continue;
-
-            foreach ( $values as $value ) {
-                add_post_meta( $duplicate_id, $key, maybe_unserialize( $value ) );
-            }
-        }
-
-        if ( $thumbnail_id ) {
-            $attachment_element_type = WP_LOC_DB::post_element_type( 'attachment' );
-            $translated_thumb = $db->get_element_translation( (int) $thumbnail_id, $attachment_element_type, $lang_slug );
-            set_post_thumbnail( $duplicate_id, $translated_thumb ?: $thumbnail_id );
-        }
-
-        // Fix slug — wp_insert_post may have added "-2" because icl_translations
-        // registration happens after insert; now that language is set, re-apply original slug
-        wp_update_post( [
-            'ID'        => $duplicate_id,
-            'post_name' => $post->post_name,
-        ] );
+        $content->sync_terms_to_translation( $post_id, $duplicate_id, $lang_slug );
 
         /** This action is documented in includes/class-wp-loc-content.php */
         do_action( 'wp_loc_translation_created', $duplicate_id, $post_id, $lang_slug );
@@ -1043,6 +1146,30 @@ class WP_LOC_Admin {
 
         global $pagenow;
 
+        // Nav menus start in the default language whatever the setting: Menu Sync and theme
+        // locations treat the default-language menu as the master of its group.
+        if ( $pagenow === 'nav-menus.php' ) {
+            $this->restrict_non_default_language_menu_creation();
+            return;
+        }
+
+        // The Customizer publishes new menus through admin-ajax.php. An error, not wp_die():
+        // dying mid-publish would leave the rest of the changeset half-applied.
+        if ( wp_doing_ajax() && ( $_REQUEST['action'] ?? '' ) === 'customize_save' ) {
+            add_filter( 'pre_insert_term', function ( $term, $taxonomy ) {
+                if ( $taxonomy !== 'nav_menu' || isset( $_REQUEST['trid'] ) || isset( $_REQUEST['wp_loc_source_term'] ) ) {
+                    return $term;
+                }
+
+                return new WP_Error(
+                    'wp_loc_default_language_only',
+                    __( 'Creating new content is only available in the primary language of the site. Switch to the default language first.', 'wp-loc' )
+                );
+            }, 10, 2 );
+        }
+
+        if ( ! WP_LOC_Admin_Settings::should_restrict_new_content_to_default_language() ) return;
+
         // Block post-new.php for translatable post types only
         if ( $pagenow === 'post-new.php' ) {
             $new_post_type = $_GET['post_type'] ?? 'post';
@@ -1054,6 +1181,33 @@ class WP_LOC_Admin {
             );
         }
 
+        // Block adding a new term on its taxonomy screen (but allow a translation via trid).
+        // Terms created while a post is saved — a new tag typed in the editor, a category added
+        // from its meta box — are left alone: dying there aborted the save after the post row
+        // was written but before save_post, so meta fields and translation sync were lost.
+        if ( ( $_REQUEST['action'] ?? '' ) === 'add-tag' ) {
+            add_filter( 'pre_insert_term', function ( $term, $taxonomy ) {
+                if ( ! WP_LOC_Terms::is_translatable( (string) $taxonomy ) || isset( $_REQUEST['trid'] ) || isset( $_REQUEST['wp_loc_source_term'] ) ) {
+                    return $term;
+                }
+
+                $message = __( 'Creating new content is only available in the primary language of the site. Switch to the default language first.', 'wp-loc' );
+
+                // The AJAX form shows the error text inline; the no-JS submit of edit-tags.php
+                // would only say "Item not added.", and it has written nothing yet.
+                if ( ! wp_doing_ajax() ) {
+                    wp_die( $message, __( 'Action not allowed', 'wp-loc' ), [ 'back_link' => true ] );
+                }
+
+                return new WP_Error( 'wp_loc_default_language_only', $message );
+            }, 10, 2 );
+        }
+    }
+
+    /**
+     * Block creating new menus in a non-default language, but allow creating a translation.
+     */
+    private function restrict_non_default_language_menu_creation(): void {
         // Block creating new terms (but allow if it's a translation via trid)
         add_filter( 'pre_insert_term', function ( $term ) {
             if ( isset( $_REQUEST['trid'] ) || isset( $_REQUEST['wp_loc_source_term'] ) ) {
@@ -1066,27 +1220,24 @@ class WP_LOC_Admin {
             );
         } );
 
-        // Block creating new menus in non-default language, but allow creating a translation.
-        if ( $pagenow === 'nav-menus.php' ) {
-            $is_create_submit = isset( $_REQUEST['action'] ) && $_REQUEST['action'] === 'create-nav-menu';
-            $is_create_screen = isset( $_REQUEST['action'] ) && $_REQUEST['action'] === 'edit' && isset( $_REQUEST['menu'] ) && (int) $_REQUEST['menu'] === 0;
-            $has_any_menus = ! empty( wp_get_nav_menus() );
+        $is_create_submit = isset( $_REQUEST['action'] ) && $_REQUEST['action'] === 'create-nav-menu';
+        $is_create_screen = isset( $_REQUEST['action'] ) && $_REQUEST['action'] === 'edit' && isset( $_REQUEST['menu'] ) && (int) $_REQUEST['menu'] === 0;
+        $has_any_menus = ! empty( wp_get_nav_menus() );
 
-            if ( ! $has_any_menus ) {
-                return;
-            }
+        if ( ! $has_any_menus ) {
+            return;
+        }
 
-            if ( ( $is_create_submit || $is_create_screen ) && isset( $_REQUEST['wp_loc_translation_of'] ) ) {
-                return;
-            }
+        if ( ( $is_create_submit || $is_create_screen ) && isset( $_REQUEST['wp_loc_translation_of'] ) ) {
+            return;
+        }
 
-            if ( $is_create_submit || $is_create_screen ) {
-                wp_die(
-                    __( 'Creating new content is only available in the primary language of the site. Switch to the default language first.', 'wp-loc' ),
-                    __( 'Action not allowed', 'wp-loc' ),
-                    [ 'back_link' => true ]
-                );
-            }
+        if ( $is_create_submit || $is_create_screen ) {
+            wp_die(
+                __( 'Creating new content is only available in the primary language of the site. Switch to the default language first.', 'wp-loc' ),
+                __( 'Action not allowed', 'wp-loc' ),
+                [ 'back_link' => true ]
+            );
         }
     }
 

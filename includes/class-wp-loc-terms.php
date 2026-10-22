@@ -197,7 +197,8 @@ class WP_LOC_Terms {
      * never affected because its metabox renders on a real admin screen).
      * The terms collection request does not carry the post, so it is recovered
      * from an explicit ?post= arg when present, otherwise from the editor
-     * screen's referer (post.php?post=ID). Returns null outside REST or when no
+     * screen's referer (post.php?post=ID); a new post's editor on post-new.php
+     * sends its language as wp_loc_edit_lang. Returns null outside REST or when no
      * post context can be recovered — callers then fall back to the old context.
      *
      * Memoized: `get_term` runs this once per term, and the answer cannot change
@@ -238,17 +239,17 @@ class WP_LOC_Terms {
             }
         }
 
-        if ( ! $post_id ) {
-            return null;
+        $post = $post_id ? get_post( $post_id ) : null;
+
+        if ( $post instanceof \WP_Post ) {
+            $lang = WP_LOC::instance()->db->get_element_language( (int) $post->ID, WP_LOC_DB::post_element_type( $post->post_type ) )
+                ?: WP_LOC_Content::get_new_post_language( (int) $post->ID );
+        } else {
+            // post-new.php keeps its URL until the first save, so its requests name no post;
+            // its editor sends its language along instead (WP_LOC_Admin::enqueue_assets()).
+            $edit_lang = $_REQUEST['wp_loc_edit_lang'] ?? '';
+            $lang = is_scalar( $edit_lang ) ? WP_LOC_Routing::normalize_language_context( sanitize_text_field( wp_unslash( (string) $edit_lang ) ) ) : null;
         }
-
-        $post = get_post( $post_id );
-
-        if ( ! $post instanceof \WP_Post ) {
-            return null;
-        }
-
-        $lang = WP_LOC::instance()->db->get_element_language( (int) $post->ID, WP_LOC_DB::post_element_type( $post->post_type ) );
 
         self::$rest_edited_post_language = $lang ?: null;
 

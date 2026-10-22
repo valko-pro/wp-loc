@@ -570,7 +570,10 @@ class WP_LOC_Routing {
         if ( ! WP_LOC_Admin_Settings::is_translatable( $post_type ) ) return $slug;
 
         $element_type = WP_LOC_DB::post_element_type( $post_type );
-        $lang = WP_LOC::instance()->db->get_element_language( $post_id, $element_type );
+        // A new post is registered only at save_post, after its first save has picked the slug:
+        // use the language it was opened in, so publishing it at once does not add "-2".
+        $lang = WP_LOC::instance()->db->get_element_language( $post_id, $element_type )
+            ?: WP_LOC_Content::get_new_post_language( (int) $post_id );
 
         if ( ! $lang ) return $slug;
 
