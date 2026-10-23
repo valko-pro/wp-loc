@@ -64,6 +64,19 @@ class WP_LOC_AI {
         }
     }
 
+    /** @var string Why the last translate_content() call came back empty. */
+    private static $last_error = '';
+
+    /** The provider's error from the last translate_content() call, '' when it succeeded. */
+    public static function last_error(): string {
+        return self::$last_error;
+    }
+
+    /** External engines (see `wp_loc_ai_translate_content`) report their failure reason here. */
+    public static function report_error( string $message ): void {
+        self::$last_error = $message;
+    }
+
     public static function get_target_language_name( string $lang ): string {
         $normalized = sanitize_key( $lang );
         $locale = WP_LOC_Languages::get_language_locale( $normalized );
@@ -143,6 +156,7 @@ class WP_LOC_AI {
     }
 
     public static function translate_content( string $content, string $target_lang, string $target_slug = '' ): string {
+        self::$last_error = '';
         $engine = WP_LOC_Admin_Settings::get_ai_engine();
         /** External engines (registered via `wp_loc_ai_engines`) translate here; a string short-circuits the LLM path. */
         $external = apply_filters( 'wp_loc_ai_translate_content', null, $content, $target_lang, $target_slug, $engine );
@@ -215,7 +229,13 @@ class WP_LOC_AI {
     private static function run_translation_prompt( string $prompt ): string {
         $response = self::get_response( $prompt );
 
-        if ( is_wp_error( $response ) || ! is_string( $response ) ) {
+        if ( is_wp_error( $response ) ) {
+            self::$last_error = $response->get_error_message();
+
+            return '';
+        }
+
+        if ( ! is_string( $response ) ) {
             return '';
         }
 
