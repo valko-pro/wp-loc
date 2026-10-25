@@ -276,6 +276,8 @@ class WP_LOC_Routing {
         $db_lang_slug = WP_LOC_DB::to_db_language_code( $lang_slug ) ?: $lang_slug;
         $type_placeholders = implode( ', ', array_fill( 0, count( $viewable_post_types ), '%s' ) );
 
+        // Media can share a content slug. Prefer a published document without changing
+        // which other candidates WP_Query can authorize for private content or previews.
         $post_id = $wpdb->get_var( $wpdb->prepare(
             "SELECT p.ID FROM {$wpdb->posts} p
              INNER JOIN {$table} t ON t.element_id = p.ID AND t.element_type = CONCAT('post_', p.post_type)
@@ -283,6 +285,7 @@ class WP_LOC_Routing {
                AND t.language_code = %s
                AND p.post_status NOT IN ('trash', 'auto-draft')
                AND p.post_type IN ({$type_placeholders})
+             ORDER BY (p.post_status = 'publish' AND p.post_type <> 'attachment') DESC, p.ID ASC
              LIMIT 1",
             array_merge( [ $normalized_path, $db_lang_slug ], $viewable_post_types )
         ) );
@@ -298,6 +301,7 @@ class WP_LOC_Routing {
                AND t.element_id IS NULL
                AND p.post_status NOT IN ('trash', 'auto-draft')
                AND p.post_type IN ({$type_placeholders})
+             ORDER BY (p.post_status = 'publish' AND p.post_type <> 'attachment') DESC, p.ID ASC
              LIMIT 1",
             array_merge( [ $normalized_path ], $viewable_post_types )
         ) );
