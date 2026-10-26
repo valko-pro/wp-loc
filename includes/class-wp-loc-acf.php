@@ -1432,6 +1432,7 @@ class WP_LOC_ACF {
         add_filter( 'acf/update_value', [ $this, 'handle_update_value' ], 10, 3 );
         add_filter( 'acf/update_value/type=nav_menu', [ $this, 'normalize_nav_menu_field_value_on_save' ], 20, 3 );
         add_filter( 'acf/load_field', [ $this, 'handle_load_field' ] );
+        add_filter( 'acf/prepare_field', [ $this, 'prepare_readonly_choice_field' ], 20 );
         add_filter( 'acf/load_field/type=nav_menu', [ $this, 'filter_nav_menu_field_choices' ], 30 );
         add_filter( 'acf/fields/post_object/query', [ $this, 'filter_post_choice_query' ], 20, 3 );
         add_filter( 'acf/fields/page_link/query', [ $this, 'filter_post_choice_query' ], 20, 3 );
@@ -2615,8 +2616,47 @@ class WP_LOC_ACF {
         if ( $should_disable ) {
             $field['readonly'] = 1;
             $field['disabled'] = 1;
+            if ( in_array( $field['type'] ?? '', [ 'checkbox', 'radio' ], true ) ) {
+                $field['_wp_loc_readonly_choices'] = true;
+                $field = $this->prepare_readonly_choice_field( $field );
+            }
             $field['wrapper']['class'] = ( $field['wrapper']['class'] ?? '' ) . ' acf-disabled';
         }
+
+        return $field;
+    }
+
+    /**
+     * ACF checkbox/radio use disabled choice values, unlike scalar input flags.
+     * Prepare runs after the current value is loaded, including custom choices.
+     */
+    public function prepare_readonly_choice_field( $field ) {
+        // Earlier prepare filters may hide a field by returning false.
+        if ( ! is_array( $field ) || ! is_admin() || empty( $field['_wp_loc_readonly_choices'] )
+            || ! in_array( $field['type'] ?? '', [ 'checkbox', 'radio' ], true ) ) {
+            return $field;
+        }
+
+        $disabled = is_array( $field['disabled'] ?? null ) ? $field['disabled'] : [];
+        $collect = static function ( array $choices ) use ( &$collect, &$disabled ): void {
+            foreach ( $choices as $value => $label ) {
+                if ( is_array( $label ) ) {
+                    $collect( $label );
+                } else {
+                    $disabled[] = (string) $value;
+                }
+            }
+        };
+        $collect( is_array( $field['choices'] ?? null ) ? $field['choices'] : [] );
+        foreach ( (array) ( $field['value'] ?? [] ) as $value ) {
+            if ( is_scalar( $value ) ) {
+                $disabled[] = (string) $value;
+            }
+        }
+        if ( $field['type'] === 'radio' && ! empty( $field['other_choice'] ) ) {
+            $disabled[] = 'other';
+        }
+        $field['disabled'] = array_values( array_unique( array_map( 'strval', array_filter( $disabled, 'is_scalar' ) ) ) );
 
         return $field;
     }
