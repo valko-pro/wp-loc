@@ -2,7 +2,7 @@
 # This file is distributed under the GPLv2 or later.
 msgid ""
 msgstr ""
-"Project-Id-Version: WP-LOC 1.8.5\n"
+"Project-Id-Version: WP-LOC 1.11.0\n"
 "Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/wp-loc\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -303,6 +303,10 @@ msgstr ""
 msgid "Translation Workflow"
 msgstr ""
 
+#: includes/class-wp-loc-admin-settings.php:737
+msgid "Create new posts, pages and terms only in the default language; other languages get them as translations"
+msgstr ""
+
 #: includes/class-wp-loc-admin-settings.php:716
 msgid "Automatically create sibling post and page translations when a new source entry is saved"
 msgstr ""
@@ -577,6 +581,12 @@ msgstr ""
 #: includes/class-wp-loc-terms.php:1202
 #: includes/class-wp-loc-terms.php:1262
 msgid "Translations"
+msgstr ""
+
+#. translators: %s: language name
+#: includes/class-wp-loc-admin.php:747
+#, php-format
+msgid "This post will be created in %s."
 msgstr ""
 
 #: includes/class-wp-loc-admin.php:662

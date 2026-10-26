@@ -31,7 +31,10 @@ class WP_LOC_Terms {
         add_action( 'wp_ajax_wp_loc_translate_term_name', [ $this, 'ajax_translate_term_name' ] );
         add_action( 'admin_notices', [ $this, 'render_protected_term_delete_notice' ] );
         add_action( 'current_screen', [ $this, 'register_admin_ui' ] );
-        add_action( 'pre_get_posts', [ $this, 'translate_term_queries' ] );
+        // Late, so term IDs that themes and plugins put into the query on pre_get_posts are translated too.
+        add_action( 'pre_get_posts', [ $this, 'translate_term_queries' ], 1000 );
+        add_action( 'init', [ $this, 'maybe_rebuild_term_hierarchy_cache' ], 999 );
+        add_filter( 'pre_update_option', [ $this, 'keep_term_hierarchy_language_complete' ], 10, 2 );
         add_filter( 'get_terms', [ $this, 'sort_admin_terms_by_default_language_name' ], 10, 4 );
         add_filter( 'terms_clauses', [ $this, 'filter_terms_clauses' ], 10, 3 );
         add_filter( 'wp_unique_term_slug', [ $this, 'allow_duplicate_term_slugs' ], 99, 3 );
@@ -293,7 +296,8 @@ class WP_LOC_Terms {
      * never affected because its metabox renders on a real admin screen).
      * The terms collection request does not carry the post, so it is recovered
      * from an explicit ?post= arg when present, otherwise from the editor
-     * screen's referer (post.php?post=ID). Returns null outside REST or when no
+     * screen's referer (post.php?post=ID); a new post's editor on post-new.php
+     * sends its language as wp_loc_edit_lang. Returns null outside REST or when no
      * post context can be recovered — callers then fall back to the old context.
      *
      * Memoized: `get_term` runs this once per term, and the answer cannot change
@@ -334,17 +338,17 @@ class WP_LOC_Terms {
             }
         }
 
-        if ( ! $post_id ) {
-            return null;
+        $post = $post_id ? get_post( $post_id ) : null;
+
+        if ( $post instanceof \WP_Post ) {
+            $lang = WP_LOC::instance()->db->get_element_language( (int) $post->ID, WP_LOC_DB::post_element_type( $post->post_type ) )
+                ?: WP_LOC_Content::get_new_post_language( (int) $post->ID );
+        } else {
+            // post-new.php keeps its URL until the first save, so its requests name no post;
+            // its editor sends its language along instead (WP_LOC_Admin::enqueue_assets()).
+            $edit_lang = $_REQUEST['wp_loc_edit_lang'] ?? '';
+            $lang = is_scalar( $edit_lang ) ? WP_LOC_Routing::normalize_language_context( sanitize_text_field( wp_unslash( (string) $edit_lang ) ) ) : null;
         }
-
-        $post = get_post( $post_id );
-
-        if ( ! $post instanceof \WP_Post ) {
-            return null;
-        }
-
-        $lang = WP_LOC::instance()->db->get_element_language( (int) $post->ID, WP_LOC_DB::post_element_type( $post->post_type ) );
 
         self::$rest_edited_post_language = $lang ?: null;
 
@@ -1180,7 +1184,7 @@ class WP_LOC_Terms {
      * Skip term SQL filtering for internal/core lookups that should remain raw.
      */
     private function should_skip_terms_filter(): bool {
-        if ( self::$query_filter_suspension_depth > 0 ) {
+        if ( self::$query_filter_suspension_depth > 0 && ! self::$updating_term ) {
             return true;
         }
 
@@ -1192,6 +1196,18 @@ class WP_LOC_Terms {
             $trace
         );
 
+        // Suspended (without_language_filter), but inside wp_update_term()'s duplicate-slug
+        // window: add-ons write term translations unscoped, and that one get_term_by() must
+        // still see only the term's own language, or a translation can never keep the slug
+        // its source holds. Every other query in the window stays unfiltered.
+        // $updating_term is released on edit_terms, which a refused update (duplicate slug) never
+        // reaches, so the window is also bounded by wp_update_term() itself being on the stack.
+        $in_duplicate_slug_check = in_array( 'get_term_by', $functions, true ) && in_array( 'wp_update_term', $functions, true );
+
+        if ( self::$query_filter_suspension_depth > 0 ) {
+            return ! $in_duplicate_slug_check;
+        }
+
         foreach ( [ '_get_term_hierarchy', 'wp_get_object_terms' ] as $function ) {
             if ( in_array( $function, $functions, true ) ) {
                 return true;
@@ -1202,7 +1218,7 @@ class WP_LOC_Terms {
         // exception is wp_update_term()'s duplicate-slug check: it uses get_term_by() and must
         // honour per-language slug uniqueness, otherwise a translation can never take a slug its
         // sibling already holds. self::$updating_term is only set for that check.
-        if ( in_array( 'get_term_by', $functions, true ) && ! $this->is_term_save_request() && ! self::$updating_term ) {
+        if ( in_array( 'get_term_by', $functions, true ) && ! $this->is_term_save_request() && ! ( self::$updating_term && $in_duplicate_slug_check ) ) {
             return true;
         }
 
@@ -1889,15 +1905,95 @@ class WP_LOC_Terms {
     }
 
     /**
+     * Store {taxonomy}_children with the parents of every language.
+     *
+     * _get_term_hierarchy() builds the option from get_terms( 'fields' => 'id=>parent' ). The SQL filter
+     * skips that lookup, but get_term() still adjusts each row to the context language, so the map
+     * collapses to one language's IDs and get_term_children() — with it the include_children part of
+     * 'cat' queries — finds no child terms in the other languages. Build it from the raw table instead.
+     *
+     * @param mixed  $value  New option value.
+     * @param string $option Option name.
+     * @return mixed
+     */
+    public function keep_term_hierarchy_language_complete( $value, $option ) {
+        if ( ! is_array( $value ) || ! is_string( $option ) || substr( $option, -9 ) !== '_children' ) {
+            return $value;
+        }
+
+        $taxonomy = substr( $option, 0, -9 );
+        if ( ! taxonomy_exists( $taxonomy ) || ! is_taxonomy_hierarchical( $taxonomy ) || ! self::is_translatable( $taxonomy ) ) {
+            return $value;
+        }
+
+        global $wpdb;
+
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT term_id, parent FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s AND parent > 0 ORDER BY term_id ASC",
+            $taxonomy
+        ) );
+
+        $children = [];
+        foreach ( (array) $rows as $row ) {
+            $children[ (int) $row->parent ][] = (int) $row->term_id;
+        }
+
+        return $children;
+    }
+
+    /**
+     * Rebuild the cached term hierarchies ({taxonomy}_children) once per plugin version.
+     *
+     * Hierarchies cached before keep_term_hierarchy_language_complete() existed — by an older WP-LOC
+     * or by another multilingual plugin that scoped term queries to one language — hold a single
+     * language's parents; rebuilding stores them through the filter above.
+     */
+    public function maybe_rebuild_term_hierarchy_cache(): void {
+        // The plugin version each taxonomy was last rebuilt for. A taxonomy that is not registered
+        // in this request (WP-CLI with --skip-themes, a theme that registers it late) waits for a
+        // request that has it instead of being marked done with its old hierarchy still cached.
+        $rebuilt = get_option( 'wp_loc_term_hierarchy_cache_version' );
+        $rebuilt = is_array( $rebuilt ) ? $rebuilt : [];
+        $changed = false;
+
+        foreach ( self::get_translatable_taxonomies() as $taxonomy ) {
+            if ( ( $rebuilt[ $taxonomy ] ?? null ) === WP_LOC_VERSION || ! taxonomy_exists( $taxonomy ) ) {
+                continue;
+            }
+
+            if ( is_taxonomy_hierarchical( $taxonomy ) ) {
+                clean_taxonomy_cache( $taxonomy );
+            }
+
+            $rebuilt[ $taxonomy ] = WP_LOC_VERSION;
+            $changed = true;
+        }
+
+        if ( $changed ) {
+            update_option( 'wp_loc_term_hierarchy_cache_version', $rebuilt );
+        }
+    }
+
+    /**
      * Translate taxonomy-related query vars to the current language.
      */
     public function translate_term_queries( \WP_Query $query ): void {
-        if ( is_admin() || ! $query->is_main_query() ) {
+        // Secondary queries count too (blocks and widgets running their own WP_Query with a term ID
+        // stored on a page duplicated from another language), so the scope follows the frontend post
+        // language filter: frontend and frontend AJAX, never the admin or the block-editor REST layer.
+        if ( is_admin() && ! WP_LOC_Routing::is_frontend_ajax_request() ) {
             return;
         }
 
+        if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+            return;
+        }
+
+        // Unfiltered queries (get_posts() defaults) are translated as well: their term look-ups are
+        // language-scoped like any other, so a term ID from another language would match nothing.
+
         $lang = $query->get( 'lang' ) ?: wp_loc_get_current_lang();
-        if ( ! $lang ) {
+        if ( ! is_string( $lang ) || $lang === '' || $lang === 'all' ) {
             return;
         }
 
@@ -1916,7 +2012,12 @@ class WP_LOC_Terms {
         }
 
         $translate_clause = function ( array $clause ) use ( $lang, &$translate_clause ) {
-            if ( isset( $clause['relation'] ) ) {
+            // A nested group, with or without its own 'relation': the test WP_Tax_Query uses.
+            $is_first_order = array_key_exists( 'terms', $clause ) || array_key_exists( 'taxonomy', $clause )
+                || array_key_exists( 'include_children', $clause ) || array_key_exists( 'field', $clause )
+                || array_key_exists( 'operator', $clause );
+
+            if ( ! $is_first_order ) {
                 foreach ( $clause as $key => $value ) {
                     if ( is_array( $value ) ) {
                         $clause[ $key ] = $translate_clause( $value );
@@ -1926,14 +2027,12 @@ class WP_LOC_Terms {
                 return $clause;
             }
 
-            $taxonomy = $clause['taxonomy'] ?? '';
-            $field = $clause['field'] ?? 'term_id';
+            $taxonomy = is_string( $clause['taxonomy'] ?? null ) ? $clause['taxonomy'] : '';
+            $field = strtolower( (string) ( $clause['field'] ?? 'term_id' ) );
 
-            if ( ! $taxonomy || ! self::is_translatable( $taxonomy ) ) {
-                return $clause;
-            }
-
-            if ( ! in_array( $field, [ 'term_id', 'id' ], true ) ) {
+            // Slugs and names are looked up in the query's language already; anything else that
+            // WP_Tax_Query does not know is a term ID to it.
+            if ( ! $taxonomy || ! self::is_translatable( $taxonomy ) || in_array( $field, [ 'slug', 'name' ], true ) ) {
                 return $clause;
             }
 
@@ -1941,7 +2040,9 @@ class WP_LOC_Terms {
             $translated_terms = [];
 
             foreach ( $terms as $term_id ) {
-                $translated_terms[] = self::get_term_translation( $term_id, $taxonomy, $lang ) ?: $term_id;
+                $translated_terms[] = $field === 'term_taxonomy_id'
+                    ? ( WP_LOC::instance()->db->get_element_translation( $term_id, WP_LOC_DB::tax_element_type( $taxonomy ), $lang ) ?: $term_id )
+                    : ( self::get_term_translation( $term_id, $taxonomy, $lang ) ?: $term_id );
             }
 
             $clause['terms'] = $translated_terms;

@@ -1,7 +1,4 @@
-# WP-LOC — Lightweight Multilingual Plugin
-
-## What is this?
-A lightweight, WPML/ICL-compatible WordPress multilingual plugin: it reuses the WPML `{prefix}icl_translations` table and ships an `icl_*`/`wpml_*` compatibility layer, so it can replace WPML and migrate existing multilingual data with near-zero effort.
+# WP-LOC — instructions for agents
 
 ## Architecture
 
