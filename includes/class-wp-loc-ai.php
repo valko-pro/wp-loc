@@ -197,7 +197,7 @@ class WP_LOC_AI {
             return false;
         }
 
-        $normalized = mb_strtolower( preg_replace( '/\s+/u', ' ', $normalized ) );
+        $normalized = self::lowercase( (string) preg_replace( '/\s+/u', ' ', $normalized ) );
 
         $patterns = [
             "i'm sorry",
@@ -287,7 +287,7 @@ class WP_LOC_AI {
             $value = html_entity_decode( $value, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
             $value = preg_replace( '/\s+/u', ' ', $value );
 
-            return trim( mb_strtolower( (string) $value ) );
+            return trim( self::lowercase( (string) $value ) );
         };
 
         $normalized_source = $normalize( $source );
@@ -298,6 +298,14 @@ class WP_LOC_AI {
         }
 
         return $normalized_source === $normalized_result;
+    }
+
+    /**
+     * Lowercase for comparisons. WordPress polyfills mb_substr() and mb_strlen() but not
+     * mb_strtolower(), so without mbstring only ASCII is folded instead of a fatal error.
+     */
+    private static function lowercase( string $value ): string {
+        return function_exists( 'mb_strtolower' ) ? mb_strtolower( $value ) : strtolower( $value );
     }
 
 

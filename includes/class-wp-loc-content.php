@@ -218,6 +218,81 @@ class WP_LOC_Content {
         }
     }
 
+    /**
+     * Give a freshly created translation the source's terms, mapped to its language.
+     *
+     * Translation copies are inserted with the source's other data, but core assigns
+     * them only the default category of the request's language. Syncing from the
+     * source here keeps that stray term from being mirrored back onto the group, and
+     * whatever the source did not replace is then dropped if it is in another language.
+     */
+    public function sync_terms_to_translation( int $source_id, int $translation_id, string $lang_slug ): void {
+        $source = get_post( $source_id );
+        $translation = get_post( $translation_id );
+
+        if ( ! $source instanceof \WP_Post || ! $translation instanceof \WP_Post ) {
+            return;
+        }
+
+        $translation_only = [ $lang_slug => (object) [ 'element_id' => $translation_id ] ];
+        $was_syncing = self::$syncing;
+        self::$syncing = true;
+
+        try {
+            if ( WP_LOC_Admin_Settings::should_sync_post_taxonomies() ) {
+                $source_lang = WP_LOC::instance()->db->get_element_language( $source_id, WP_LOC_DB::post_element_type( $source->post_type ) );
+                $this->sync_post_terms( $source_id, $source, $translation_only, $source_lang );
+            }
+
+            $this->sync_post_terms( $translation_id, $translation, $translation_only, $lang_slug );
+            $this->ensure_default_category( $translation, $lang_slug );
+        } finally {
+            self::$syncing = $was_syncing;
+        }
+    }
+
+    /**
+     * Parent for a translation of $post in $lang_slug: the parent's translation when it has one.
+     */
+    public function get_translated_parent_id( \WP_Post $post, string $lang_slug ): int {
+        if ( ! $post->post_parent ) {
+            return 0;
+        }
+
+        // The parent may be another post type (product_variation -> product), so look it up by its own element type.
+        $parent_type = get_post_type( $post->post_parent ) ?: $post->post_type;
+        $translated_parent = WP_LOC::instance()->db->get_element_translation( $post->post_parent, WP_LOC_DB::post_element_type( $parent_type ), $lang_slug );
+
+        return $translated_parent ?: (int) $post->post_parent;
+    }
+
+    /**
+     * A 'post' always has a category: core falls back to get_option( 'default_category' ),
+     * the default-language term. While the request works in another language, core's
+     * language-filtered term_exists() drops that term, so a new original in that language
+     * ended up with no category. Assign the default category's translation instead.
+     */
+    private function ensure_default_category( \WP_Post $post, string $lang_slug ): void {
+        if ( $post->post_type !== 'post' || ! class_exists( 'WP_LOC_Terms' ) || ! WP_LOC_Terms::is_translatable( 'category' ) ) {
+            return;
+        }
+
+        $assigned = WP_LOC_Terms::without_language_filter(
+            static fn() => wp_get_object_terms( $post->ID, 'category', [ 'fields' => 'ids' ] )
+        );
+
+        if ( is_wp_error( $assigned ) || ! empty( $assigned ) ) {
+            return;
+        }
+
+        $default_category = (int) get_option( 'default_category' );
+        $translated_default = $default_category ? WP_LOC_Terms::get_term_translation( $default_category, 'category', $lang_slug ) : null;
+
+        if ( $translated_default ) {
+            $this->assign_post_terms_in_language( $post->ID, 'category', [ (int) $translated_default ], $lang_slug );
+        }
+    }
+
     public function __construct() {
         add_action( 'wp_insert_post', [ $this, 'mark_new_post' ], 10, 3 );
         add_action( 'save_post', [ $this, 'handle_save_post' ], 20, 3 );
@@ -286,7 +361,13 @@ class WP_LOC_Content {
         $translatable = apply_filters( 'wp_loc_translatable_post_types', [ 'post', 'page' ] );
         if ( ! in_array( $post->post_type, $translatable, true ) ) return;
 
-        add_post_meta( $post_id, '_wp_loc_is_new', 1, true );
+        // The marker carries the language the editor was opened in: the first save of a
+        // block-editor post is a REST request, and REST never gets the admin_lang cookie
+        // (its path is /wp-admin), so the language must be fixed while post-new.php has it.
+        global $pagenow;
+        $marker = is_admin() && $pagenow === 'post-new.php' ? wp_loc_get_admin_lang() : 1;
+
+        add_post_meta( $post_id, '_wp_loc_is_new', $marker, true );
 
         // Outside the admin editor (REST, CLI, importers) there is no second save to
         // wait for: register the language now, without creating translation copies.
@@ -295,15 +376,31 @@ class WP_LOC_Content {
         }
     }
 
-    /** Store the post's language (admin-bar language, default outside the admin) and optionally create the copies. */
+    /**
+     * Language a new, not yet registered post was opened in on post-new.php.
+     */
+    public static function get_new_post_language( int $post_id ): ?string {
+        $marker = get_post_meta( $post_id, '_wp_loc_is_new', true );
+
+        if ( ! is_string( $marker ) || ! isset( WP_LOC_Languages::get_active_languages()[ $marker ] ) ) {
+            return null;
+        }
+
+        return $marker;
+    }
+
+    /** Store the post's language (the one post-new.php was opened in, else the admin-bar language) and optionally create the copies. */
     private function register_post_language( int $post_id, \WP_Post $post, bool $create_copies ): void {
         $db = WP_LOC::instance()->db;
         $element_type = WP_LOC_DB::post_element_type( $post->post_type );
 
         if ( $db->get_element_language( $post_id, $element_type ) ) return;
 
+        $current_lang = self::get_new_post_language( $post_id ) ?? wp_loc_get_admin_lang();
+
         delete_post_meta( $post_id, '_wp_loc_is_new' );
-        $db->set_element_language( $post_id, $element_type, wp_loc_get_admin_lang() );
+        $db->set_element_language( $post_id, $element_type, $current_lang );
+        $this->ensure_default_category( $post, $current_lang );
 
         if ( $create_copies && WP_LOC_Admin_Settings::should_auto_create_post_translations() ) {
             $this->create_translations( $post_id );
@@ -351,8 +448,9 @@ class WP_LOC_Content {
         $db = WP_LOC::instance()->db;
         $element_type = WP_LOC_DB::post_element_type( $post->post_type );
 
-        // Get or create trid for this post
-        $current_lang = wp_loc_get_admin_lang();
+        // Get or create trid for this post. The source is the post's own language: the admin
+        // language differs from it in REST saves (no admin_lang cookie there).
+        $current_lang = $db->get_element_language( $post_id, $element_type ) ?: wp_loc_get_admin_lang();
         $trid = $db->get_trid( $post_id, $element_type );
 
         if ( ! $trid ) {
@@ -382,7 +480,7 @@ class WP_LOC_Content {
                 'post_excerpt'  => $post->post_excerpt,
                 'post_status'   => 'draft',
                 'post_type'     => $post->post_type,
-                'post_parent'   => $post->post_parent,
+                'post_parent'   => $this->get_translated_parent_id( $post, $lang_slug ),
                 'menu_order'    => $post->menu_order,
                 'post_password' => $post->post_password,
                 'post_author'   => $post->post_author,
@@ -393,14 +491,10 @@ class WP_LOC_Content {
             // Register in icl_translations
             $db->set_element_language( $duplicate_id, $element_type, $lang_slug, $trid, $current_lang );
 
-            // Fix slug — wp_insert_post may have added "-2" because icl_translations
-            // registration happens after insert; now that language is set, re-apply original slug
-            self::without_submitted_form( fn() => wp_update_post( [
-                'ID'        => $duplicate_id,
-                'post_name' => $post->post_name,
-            ] ) );
-
-            // Copy meta
+            // Copy meta — BEFORE the slug-fix save below, so that save_post hooks
+            // which materialize per-post meta on a registered translation (e.g. a
+            // theme's editor-mode flag) already see the source values and do not
+            // write a row of their own that this copy would then duplicate.
             foreach ( $meta as $key => $values ) {
                 if ( str_starts_with( $key, '_wp_loc_' ) ) continue;
                 if ( $key === '_edit_lock' || $key === '_edit_last' ) continue;
@@ -417,8 +511,27 @@ class WP_LOC_Content {
                 set_post_thumbnail( $duplicate_id, $translated_thumb ?: $thumbnail_id );
             }
 
+            // Fix slug — wp_insert_post may have added "-2" because icl_translations
+            // registration happens after insert; now that language is set, re-apply original slug
+            self::without_submitted_form( fn() => wp_update_post( [
+                'ID'        => $duplicate_id,
+                'post_name' => $post->post_name,
+            ] ) );
+
+            $this->sync_terms_to_translation( $post_id, $duplicate_id, $lang_slug );
+
             /**
-             * Fires after a translation copy of a post has been created and linked.
+             * Fires once a translation draft is fully created: registered in
+             * icl_translations, with the source post's meta, thumbnail and terms copied.
+             *
+             * @param int    $duplicate_id The new translation post ID.
+             * @param int    $post_id      The source post it was copied from.
+             * @param string $lang_slug    Language slug of the new translation.
+             */
+            do_action( 'wp_loc_translation_created', $duplicate_id, $post_id, $lang_slug );
+
+            /**
+             * Same moment, with the source language for add-ons (wp-loc-auto-translate).
              *
              * @param int    $duplicate_id New translation post ID.
              * @param int    $post_id      Source post ID.
@@ -472,16 +585,7 @@ class WP_LOC_Content {
                     'post_password' => $post->post_password,
                 ];
 
-                // Resolve translated parent. The parent may be another post type
-                // (product_variation -> product), so look it up by its own element type.
-                if ( $post->post_parent ) {
-                    $parent_type = get_post_type( $post->post_parent );
-                    $parent_element_type = $parent_type ? WP_LOC_DB::post_element_type( $parent_type ) : $element_type;
-                    $translated_parent = $db->get_element_translation( $post->post_parent, $parent_element_type, $slug );
-                    $update_data['post_parent'] = $translated_parent ?: $post->post_parent;
-                } else {
-                    $update_data['post_parent'] = 0;
-                }
+                $update_data['post_parent'] = $this->get_translated_parent_id( $post, $slug );
 
                 self::without_submitted_form( fn() => wp_update_post( $update_data ) );
 
