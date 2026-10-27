@@ -1233,7 +1233,7 @@ class WP_LOC_Terms {
             return false;
         }
 
-        $taxonomy = sanitize_key( $_REQUEST['taxonomy'] ?? '' );
+        $taxonomy = self::term_save_taxonomy();
 
         if ( ! $taxonomy || ! self::is_translatable( $taxonomy ) ) {
             return false;
@@ -1241,7 +1241,24 @@ class WP_LOC_Terms {
 
         $action = sanitize_key( $_REQUEST['action'] ?? '' );
 
-        return in_array( $action, [ 'editedtag', 'add-tag', 'inline-save-tax' ], true );
+        return in_array( $action, [ 'editedtag', 'add-tag', 'inline-save-tax', "add-{$taxonomy}" ], true );
+    }
+
+    /**
+     * Taxonomy of the current term save: the `taxonomy` field of the taxonomy screen, or the
+     * one named by the editor's inline "+ Add new" AJAX (`action=add-{taxonomy}`, which posts
+     * no `taxonomy` field at all).
+     */
+    private static function term_save_taxonomy(): string {
+        $taxonomy = sanitize_key( $_REQUEST['taxonomy'] ?? '' );
+
+        if ( $taxonomy ) {
+            return $taxonomy;
+        }
+
+        $action = sanitize_key( $_REQUEST['action'] ?? '' );
+
+        return str_starts_with( $action, 'add-' ) && taxonomy_exists( substr( $action, 4 ) ) ? substr( $action, 4 ) : '';
     }
 
     /**
@@ -1262,7 +1279,8 @@ class WP_LOC_Terms {
 
         $action = sanitize_key( $_REQUEST['action'] ?? '' );
 
-        return $action === 'add-tag';
+        // The taxonomy screen's form, or the post editor's inline "+ Add new" box.
+        return $action === 'add-tag' || $action === 'add-' . self::term_save_taxonomy();
     }
 
     /**
