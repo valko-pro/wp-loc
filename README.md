@@ -13,7 +13,7 @@ It keeps translation links in the same `icl_translations` table and provides the
 - **Bidirectional post taxonomy sync** — when a translated post changes its multilingual categories/tags/custom taxonomies, sibling posts receive the mapped term translations in their own language and stale foreign-language relationships are removed; REST/Gutenberg `set_object_terms` updates are handled after `save_post`
 - **Taxonomy/term translations** — migration-compatible term translation groups for `category`, `post_tag`, and selected custom taxonomies
 - **Term translation UI** — translation column in term lists, translation panel on term edit screens, and per-language `+` buttons for on-demand term translation creation
-- **Automatic term translation creation** — creating a term can auto-create sibling translations in all active languages
+- **Automatic term translation creation** — creating a term — on the taxonomy screen or from the post editor's inline "+ Add new" box — can auto-create sibling translations in all active languages
 - **Hierarchical taxonomy sync** — translated parent terms are mapped automatically when creating/editing child terms
 - **Same slug in different languages** — term slugs are unique per language, not globally
 - **Cascade delete for term translations** — deleting any translated term deletes the whole translation group
