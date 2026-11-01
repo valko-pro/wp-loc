@@ -139,6 +139,53 @@ class WP_LOC_Frontend {
     }
 
     /**
+     * Whether page $paged of a term archive exists in $lang.
+     *
+     * One LIMIT 1 OFFSET n probe instead of counting: the `lang` query var is what
+     * filter_posts_by_language() scopes by, so the archive of another language can be asked
+     * without switching the request language. Page 1 always exists.
+     *
+     * @param string[] $post_types      Empty = every post type of the taxonomy.
+     * @param array    $extra_tax_query Clauses of the real archive query (e.g. WooCommerce visibility).
+     */
+    public static function translated_archive_page_exists( int $term_id, string $taxonomy, string $lang, int $paged, int $per_page, array $post_types = [], array $extra_tax_query = [] ): bool {
+        if ( $paged < 2 ) {
+            return true;
+        }
+
+        // 'any' is a WP_Query keyword, not a post type.
+        $post_types = array_values( array_diff( $post_types, [ 'any' ] ) );
+        $taxonomy_object = get_taxonomy( $taxonomy );
+        if ( ! $post_types && $taxonomy_object ) {
+            $post_types = $taxonomy_object->object_type;
+        }
+
+        $args = [
+            'lang'                => $lang,
+            'post_type'           => $post_types,
+            'post_status'         => 'publish',
+            'tax_query'           => array_merge(
+                [ 'relation' => 'AND' ],
+                $extra_tax_query,
+                [ [ 'taxonomy' => $taxonomy, 'field' => 'term_id', 'terms' => $term_id ] ]
+            ),
+            'posts_per_page'      => 1,
+            'offset'              => ( $paged - 1 ) * max( 1, $per_page ),
+            'fields'              => 'ids',
+            'no_found_rows'       => true,
+            'ignore_sticky_posts' => true,
+            'suppress_filters'    => false,
+        ];
+
+        // WP_Tax_Query resolves the term through a term query without `lang`: left filtered, it
+        // falls back to the request language and drops a translation's term. Posts stay scoped
+        // by the `lang` query var above.
+        $query = WP_LOC_Terms::without_language_filter( static fn() => new \WP_Query( $args ) );
+
+        return ! empty( $query->posts );
+    }
+
+    /**
      * Filter frontend posts by current language
      */
     public function filter_posts_by_language( \WP_Query $query ): void {
@@ -445,9 +492,11 @@ function wp_loc_get_lang_switcher( array $args = [] ): array {
 
             if ( ! $translated_posts_page_id && $fallback_to_home ) {
                 $url = $build_home_url( $code );
+            } else {
+                $url = $add_pagination_to_url( $url );
             }
 
-            $append_switcher_item( $switcher, $code, $data, $append_current_query_args( $add_pagination_to_url( $url ) ), $has_translation );
+            $append_switcher_item( $switcher, $code, $data, $append_current_query_args( $url ), $has_translation );
         }
 
         return $switcher;
@@ -469,7 +518,37 @@ function wp_loc_get_lang_switcher( array $args = [] ): array {
                 $translated_link = WP_LOC_Terms::get_term_url_for_language( (int) $queried_term->term_id, $queried_term->taxonomy, $code );
 
                 if ( $translated_link ) {
-                    $url = $append_current_query_args( $add_pagination_to_url( $translated_link ) );
+                    // A missing translation resolves to the language home page, which has no /page/N/.
+                    $page_exists = $has_translation;
+
+                    if ( $translated_term_id && $code !== $current ) {
+                        $main_query = $GLOBALS['wp_query'];
+                        $post_types = array_filter( (array) $main_query->get( 'post_type' ) );
+                        $extra_tax_query = array_filter(
+                            (array) $main_query->get( 'tax_query' ),
+                            static fn( $clause ): bool => is_array( $clause )
+                                && isset( $clause['taxonomy'] )
+                                && $clause['taxonomy'] !== $queried_term->taxonomy
+                        );
+
+                        $page_exists = WP_LOC_Frontend::translated_archive_page_exists(
+                            $translated_term_id,
+                            $queried_term->taxonomy,
+                            $code,
+                            max( (int) get_query_var( 'paged' ), (int) get_query_var( 'page' ) ),
+                            (int) $main_query->get( 'posts_per_page' ),
+                            array_values( $post_types ),
+                            array_values( $extra_tax_query )
+                        );
+                    }
+
+                    if ( $page_exists ) {
+                        $url = $append_current_query_args( $add_pagination_to_url( $translated_link ) );
+                    } else {
+                        // No translation, or fewer pages in it: link the first page, and give hreflang nothing.
+                        $url = $append_current_query_args( $translated_link );
+                        $has_translation = $has_translation && ! $for_seo;
+                    }
                 }
 
                 $append_switcher_item( $switcher, $code, $data, $url, $has_translation );
