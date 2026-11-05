@@ -206,15 +206,32 @@ class WP_LOC_Content {
      * do not compare $_POST['post_ID'] with the saved ID (All in One SEO's metabox
      * save) would store the source form onto the sibling. Synced values come from the
      * saved source post, never from $_POST.
+     *
+     * $_REQUEST stays visible because the language context is read from it, so only
+     * the keys named through the filter are hidden.
      */
-    private static function without_submitted_form( callable $write ) {
+    private static function without_submitted_form( callable $write, int $sibling_id = 0 ) {
         $posted = $_POST;
         $_POST = [];
+
+        /**
+         * Filters the $_REQUEST keys hidden while a sibling translation is written.
+         *
+         * For handlers that act on any save carrying their key, such as bulk edits
+         * sent by GET, which $_POST does not cover.
+         *
+         * @param string[] $keys       Request keys to hide.
+         * @param int      $sibling_id Post being written, 0 when it is being created.
+         */
+        $hidden_keys = (array) apply_filters( 'wp_loc_sibling_write_hidden_request_keys', [], $sibling_id );
+        $hidden_request = array_intersect_key( $_REQUEST, array_flip( $hidden_keys ) );
+        $_REQUEST = array_diff_key( $_REQUEST, $hidden_request );
 
         try {
             return $write();
         } finally {
             $_POST = $posted;
+            $_REQUEST += $hidden_request;
         }
     }
 
@@ -516,7 +533,7 @@ class WP_LOC_Content {
             self::without_submitted_form( fn() => wp_update_post( [
                 'ID'        => $duplicate_id,
                 'post_name' => $post->post_name,
-            ] ) );
+            ] ), $duplicate_id );
 
             $this->sync_terms_to_translation( $post_id, $duplicate_id, $lang_slug );
 
@@ -587,7 +604,7 @@ class WP_LOC_Content {
 
                 $update_data['post_parent'] = $this->get_translated_parent_id( $post, $slug );
 
-                self::without_submitted_form( fn() => wp_update_post( $update_data ) );
+                self::without_submitted_form( fn() => wp_update_post( $update_data ), $sibling_id );
 
                 // Sync page template
                 if ( $page_template !== false ) {
