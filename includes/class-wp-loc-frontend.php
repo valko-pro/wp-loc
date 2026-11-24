@@ -13,6 +13,35 @@ class WP_LOC_Frontend {
         add_filter( 'language_attributes', [ $this, 'html_lang_attribute' ] );
         add_action( 'wp_head', [ $this, 'output_hreflang_tags' ] );
         add_action( 'pre_get_posts', [ $this, 'filter_posts_by_language' ] );
+        add_filter( 'option_wp_page_for_privacy_policy', [ $this, 'translate_privacy_policy_page' ] );
+    }
+
+    /**
+     * Point the privacy policy page at its translation in the current language, so
+     * get_privacy_policy_url() and every link built from it (checkout, registration,
+     * login form) stay in the visitor's language. Falls back to the original page
+     * when no translation exists. Admin keeps the stored ID for the settings screen.
+     */
+    public function translate_privacy_policy_page( $value ) {
+        $page_id = (int) $value;
+
+        if ( is_admin() || $page_id < 1 ) {
+            return $value;
+        }
+
+        $post_type = get_post_type( $page_id );
+
+        if ( ! $post_type || ! WP_LOC_Admin_Settings::is_translatable( $post_type ) ) {
+            return $value;
+        }
+
+        $translated_id = WP_LOC::instance()->db->get_element_translation(
+            $page_id,
+            WP_LOC_DB::post_element_type( $post_type ),
+            wp_loc_get_current_lang()
+        );
+
+        return $translated_id ?: $value;
     }
 
     /**
